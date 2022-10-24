@@ -14,9 +14,11 @@
 
 
 from collections import OrderedDict
+import time
 from typing import Tuple
 
 import numpy as np
+import tensorboard
 import torch
 from nnunet.training.data_augmentation.data_augmentation_moreDA import get_moreDA_augmentation
 from nnunet.training.loss_functions.deep_supervision import MultipleOutputLoss2
@@ -34,7 +36,9 @@ from torch import nn
 from torch.cuda.amp import autocast
 from nnunet.training.learning_rate.poly_lr import poly_lr
 from batchgenerators.utilities.file_and_folder_operations import *
-
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import trange
+import torch.backends.cudnn as cudnn
 
 class nnUNetTrainerV3(nnUNetTrainer):
     """
@@ -51,7 +55,11 @@ class nnUNetTrainerV3(nnUNetTrainer):
         self.ds_loss_weights = None
 
         self.pin_memory = True
-
+    def init_summary_writer(self):
+        log_dir=  os.path.join(self.output_folder_base,'train_logs')
+        if not os.path.exists(log_dir): 
+            os.makedirs(log_dir)
+        self.writer = SummaryWriter(log_dir=log_dir)
     def initialize(self, training=True, force_load_plans=False):
         """
         - replaced get_default_augmentation with get_moreDA_augmentation
@@ -438,6 +446,96 @@ class nnUNetTrainerV3(nnUNetTrainer):
         # want at the start of the training
         ds = self.network.do_ds
         self.network.do_ds = True
-        ret = super().run_training()
+        ret = super().run_cust_training()
         self.network.do_ds = ds
         return ret
+    def run_cust_training(self):
+        if not torch.cuda.is_available():
+            self.print_to_log_file("WARNING!!! You are attempting to run training on a CPU (torch.cuda.is_available() is False). This can be VERY slow!")
+
+        _ = self.tr_gen.next()
+        _ = self.val_gen.next()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        self._maybe_init_amp()
+
+        maybe_mkdir_p(self.output_folder)        
+        self.plot_network_architecture()
+
+        if cudnn.benchmark and cudnn.deterministic:
+            warn("torch.backends.cudnn.deterministic is True indicating a deterministic training is desired. "
+                 "But torch.backends.cudnn.benchmark is True as well and this will prevent deterministic training! "
+                 "If you want deterministic then set benchmark=False")
+
+        if not self.was_initialized:
+            self.initialize(True)
+
+        while self.epoch < self.max_num_epochs:
+            self.print_to_log_file("\nepoch: ", self.epoch)
+            epoch_start_time = time()
+            train_losses_epoch = []
+
+            # train one epoch
+            self.network.train()
+
+            if self.use_progress_bar:
+                with trange(self.num_batches_per_epoch) as tbar:
+                    for b in tbar:
+                        tbar.set_description("Epoch {}/{}".format(self.epoch+1, self.max_num_epochs))
+
+                        l = self.run_iteration(self.tr_gen, True)
+
+                        tbar.set_postfix(loss=l)
+                        train_losses_epoch.append(l)
+            else:
+                for _ in range(self.num_batches_per_epoch):
+                    l = self.run_iteration(self.tr_gen, True)
+                    train_losses_epoch.append(l)
+
+            self.all_tr_losses.append(np.mean(train_losses_epoch))
+            self.writer.add_scalar("train loss",self.all_tr_losses[-1],global_step=self.epoch)
+
+            with torch.no_grad():
+                # validation with train=False
+                self.network.eval()
+                val_losses = []
+                for b in range(self.num_val_batches_per_epoch):
+                    l = self.run_iteration(self.val_gen, False, True)
+                    val_losses.append(l)
+                self.all_val_losses.append(np.mean(val_losses))
+                self.writer.add_scalar("validation loss",self.all_val_losses[-1],global_step=self.epoch)
+
+                if self.also_val_in_tr_mode:
+                    self.network.train()
+                    # validation with train=True
+                    val_losses = []
+                    for b in range(self.num_val_batches_per_epoch):
+                        l = self.run_iteration(self.val_gen, False)
+                        val_losses.append(l)
+                    self.all_val_losses_tr_mode.append(np.mean(val_losses))
+                    self.writer.add_scalar("train val loss",self.all_val_losses_tr_mode[-1],global_step=self.epoch)
+
+            self.update_train_loss_MA()  # needed for lr scheduler and stopping of training
+
+            continue_training = self.on_epoch_end()
+
+            epoch_end_time = time()
+
+            if not continue_training:
+                # allows for early stopping
+                break
+
+            self.epoch += 1
+            self.writer.add_scalar("timestamp", (epoch_end_time - epoch_start_time),global_step=self.epoch)
+
+        self.epoch -= 1  # if we don't do this we can get a problem with loading model_final_checkpoint.
+
+        if self.save_final_checkpoint: self.save_checkpoint(join(self.output_folder, "model_final_checkpoint.model"))
+        # now we can delete latest as it will be identical with final
+        if isfile(join(self.output_folder, "model_latest.model")):
+            os.remove(join(self.output_folder, "model_latest.model"))
+        if isfile(join(self.output_folder, "model_latest.model.pkl")):
+            os.remove(join(self.output_folder, "model_latest.model.pkl"))
+
