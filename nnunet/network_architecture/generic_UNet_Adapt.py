@@ -21,9 +21,9 @@ import numpy as np
 from nnunet.network_architecture.initialization import InitWeights_He
 from nnunet.network_architecture.neural_network import SegmentationNetwork
 import torch.nn.functional
-from generic_UNet import *
+from nnunet.network_architecture.generic_UNet import *
 from collections import OrderedDict
-
+import pdb 
 class Generic_UNetAdapt(SegmentationNetwork):
     DEFAULT_BATCH_SIZE_3D = 2
     DEFAULT_PATCH_SIZE_3D = (64, 192, 160)
@@ -60,7 +60,7 @@ class Generic_UNetAdapt(SegmentationNetwork):
 
         Questions? -> f.isensee@dkfz.de
         """
-        super(Generic_UNet, self).__init__()
+        super(Generic_UNetAdapt, self).__init__()
         self.convolutional_upsampling = convolutional_upsampling
         self.convolutional_pooling = convolutional_pooling
         self.upscale_logits = upscale_logits
@@ -254,6 +254,7 @@ class Generic_UNetAdapt(SegmentationNetwork):
                 x = self.td[d](x)
 
         bottle_neck  = self.conv_blocks_context[-1](x)
+        pdb.set_trace()
         x = bottle_neck
         for u in range(len(self.tu)):
             x = self.tu[u](x)

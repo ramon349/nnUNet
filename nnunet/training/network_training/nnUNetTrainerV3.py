@@ -14,16 +14,16 @@
 
 
 from collections import OrderedDict
-import time
+from time import time
 from typing import Tuple
 
 import numpy as np
-import tensorboard
+from torch.utils import tensorboard
 import torch
 from nnunet.training.data_augmentation.data_augmentation_moreDA import get_moreDA_augmentation
 from nnunet.training.loss_functions.deep_supervision import MultipleOutputLoss2
 from nnunet.utilities.to_torch import maybe_to_torch, to_cuda
-from nnunet.network_architecture.generic_UNet_Adapt import Generic_UNetAdapt
+from nnunet.network_architecture.generic_UNetDA import Generic_UNetDA
 from nnunet.network_architecture.initialization import InitWeights_He
 from nnunet.network_architecture.neural_network import SegmentationNetwork
 from nnunet.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, \
@@ -39,7 +39,15 @@ from batchgenerators.utilities.file_and_folder_operations import *
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 import torch.backends.cudnn as cudnn
+import pdb 
 
+def confusion_loss(pred_pros):
+    alpha = -1*0.3 
+    probs = torch.nn.functional.softmax(pred_pros)
+    uni_probs = to_cuda(torch.FloatTensor(pred_pros.shape).uniform_(0,1))
+    return alpha * (torch.sum(uni_probs*torch.log(probs))/float(pred_pros.size(0)))
+def detach_loss(my_loss): 
+    return my_loss.detach().cpu().numpy()
 class nnUNetTrainerV3(nnUNetTrainer):
     """
     Info for Fabian: same as internal nnUNetTrainerV2_2
@@ -55,11 +63,12 @@ class nnUNetTrainerV3(nnUNetTrainer):
         self.ds_loss_weights = None
 
         self.pin_memory = True
+        self.init_summary_writer()
     def init_summary_writer(self):
         log_dir=  os.path.join(self.output_folder_base,'train_logs')
         if not os.path.exists(log_dir): 
             os.makedirs(log_dir)
-        self.writer = SummaryWriter(log_dir=log_dir)
+        self.writer = SummaryWriter(log_dir=log_dir,)
     def initialize(self, training=True, force_load_plans=False):
         """
         - replaced get_default_augmentation with get_moreDA_augmentation
@@ -95,6 +104,8 @@ class nnUNetTrainerV3(nnUNetTrainer):
             self.ds_loss_weights = weights
             # now wrap the loss
             self.loss = MultipleOutputLoss2(self.loss, self.ds_loss_weights)
+            self.domain_conf_loss = confusion_loss
+            self.domain_class_loss = torch.nn.CrossEntropyLoss()
             ################# END ###################
 
             self.folder_with_preprocessed_data = join(self.dataset_directory, self.plans['data_identifier'] +
@@ -159,7 +170,7 @@ class nnUNetTrainerV3(nnUNetTrainer):
         dropout_op_kwargs = {'p': 0, 'inplace': True}
         net_nonlin = nn.LeakyReLU
         net_nonlin_kwargs = {'negative_slope': 1e-2, 'inplace': True}
-        self.network = Generic_UNetAdapt(self.num_input_channels, self.base_num_features, self.num_classes,
+        self.network = Generic_UNetDA(self.num_input_channels, self.base_num_features, self.num_classes,
                                     len(self.net_num_pool_op_kernel_sizes),
                                     self.conv_per_stage, 2, conv_op, norm_op, norm_op_kwargs, dropout_op,
                                     dropout_op_kwargs,
@@ -227,7 +238,14 @@ class nnUNetTrainerV3(nnUNetTrainer):
                                                                        mixed_precision=mixed_precision)
         self.network.do_ds = ds
         return ret
-
+    def gen_domain_labels(self,data_dict): 
+        label_tens = list() 
+        for e in data_dict['keys']:
+            if  e.startswith('c'): 
+                label_tens.append(1)
+            else: 
+                label_tens.append(0)
+        return torch.tensor(label_tens).type(torch.LongTensor)
     def run_iteration(self, data_generator, do_backprop=True, run_online_evaluation=False):
         """
         gradient clipping improves training stability
@@ -237,9 +255,11 @@ class nnUNetTrainerV3(nnUNetTrainer):
         :param run_online_evaluation:
         :return:
         """
+        import pdb 
         data_dict = next(data_generator)
         data = data_dict['data']
         target = data_dict['target']
+        domain_labels =  to_cuda(self.gen_domain_labels(data_dict))
 
         data = maybe_to_torch(data)
         target = maybe_to_torch(target)
@@ -251,13 +271,31 @@ class nnUNetTrainerV3(nnUNetTrainer):
         self.optimizer.zero_grad()
 
         if self.fp16:
+            #first initial pass for the optimization of one loss 
             with autocast():
                 output = self.network(data)
-                del data
-                l = self.loss(output, target)
+                seg_pred,embed_domain_pred,mask_domain_pred = output 
+                l = self.loss(seg_pred, target)
+                embed_domain_loss = self.domain_class_loss(embed_domain_pred,domain_labels) 
+                mask_domain_loss = self.domain_class_loss(mask_domain_pred ,domain_labels) 
+                joint_loss =  l + 0*embed_domain_loss + 0*mask_domain_loss 
 
             if do_backprop:
                 self.amp_grad_scaler.scale(l).backward()
+                self.amp_grad_scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+                self.amp_grad_scaler.step(self.optimizer)
+                self.amp_grad_scaler.update()
+            #second forward pass for the domain confusion lossses 
+            with autocast():
+                output = self.network(data)
+                del data
+                _,embed_domain_pred,mask_domain_pred = output 
+                embed_confusion_loss = self.domain_conf_loss(embed_domain_pred) 
+                mask_confusion_loss = self.domain_conf_loss(mask_domain_pred) 
+                joint_loss =  0*(embed_confusion_loss + mask_confusion_loss )
+            if do_backprop:
+                self.amp_grad_scaler.scale(joint_loss).backward()
                 self.amp_grad_scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
                 self.amp_grad_scaler.step(self.optimizer)
@@ -274,12 +312,11 @@ class nnUNetTrainerV3(nnUNetTrainer):
                 self.optimizer.step()
 
         if run_online_evaluation:
-            self.run_online_evaluation(output, target)
+            self.run_online_evaluation(seg_pred, target)
 
         del target
-
-        return l.detach().cpu().numpy()
-
+        my_losses = ( detach_loss(l),detach_loss(embed_domain_loss) ,detach_loss(embed_confusion_loss),detach_loss(mask_domain_loss),detach_loss(mask_confusion_loss) )
+        return my_losses 
     def do_split(self):
         """
         The default split is a 5 fold CV on all available training cases. nnU-Net will create a split (it is seeded,
@@ -446,9 +483,15 @@ class nnUNetTrainerV3(nnUNetTrainer):
         # want at the start of the training
         ds = self.network.do_ds
         self.network.do_ds = True
-        ret = super().run_cust_training()
+        ret = self.run_cust_training()
         self.network.do_ds = ds
         return ret
+    
+    def log_recent_losses(self,losses_list,phase='Train'): 
+        names = ["dice","embed_domain","embed_confusion","mask_domain","mask_confusion"] 
+        for n,e in zip(names,losses_list):
+            self.writer.add_scalar(f"{phase}_{n}",np.mean(e),global_step=self.epoch)
+
     def run_cust_training(self):
         if not torch.cuda.is_available():
             self.print_to_log_file("WARNING!!! You are attempting to run training on a CPU (torch.cuda.is_available() is False). This can be VERY slow!")
@@ -476,7 +519,8 @@ class nnUNetTrainerV3(nnUNetTrainer):
             self.print_to_log_file("\nepoch: ", self.epoch)
             epoch_start_time = time()
             train_losses_epoch = []
-
+            dice_losses = []  
+            all_train_losses = list(([],[],[],[],[]))
             # train one epoch
             self.network.train()
 
@@ -486,36 +530,43 @@ class nnUNetTrainerV3(nnUNetTrainer):
                         tbar.set_description("Epoch {}/{}".format(self.epoch+1, self.max_num_epochs))
 
                         l = self.run_iteration(self.tr_gen, True)
-
-                        tbar.set_postfix(loss=l)
-                        train_losses_epoch.append(l)
+                        for i,e in l: 
+                            all_train_losses[i].append(e) 
+                        tbar.set_postfix(loss=l[0])
             else:
                 for _ in range(self.num_batches_per_epoch):
                     l = self.run_iteration(self.tr_gen, True)
-                    train_losses_epoch.append(l)
+                    for i,e in enumerate(l): 
+                        all_train_losses[i].append(e) 
 
-            self.all_tr_losses.append(np.mean(train_losses_epoch))
-            self.writer.add_scalar("train loss",self.all_tr_losses[-1],global_step=self.epoch)
+            self.all_tr_losses.append(np.mean(all_train_losses[0]))
+            self.log_recent_losses(all_train_losses,phase='train')
+            #self.writer.add_scalar("train loss",self.all_tr_losses[-1],global_step=self.epoch)
 
             with torch.no_grad():
                 # validation with train=False
                 self.network.eval()
                 val_losses = []
+                dice_losses = []  
+                all_val_losses = list(([],[],[],[],[],[]))
                 for b in range(self.num_val_batches_per_epoch):
                     l = self.run_iteration(self.val_gen, False, True)
-                    val_losses.append(l)
-                self.all_val_losses.append(np.mean(val_losses))
-                self.writer.add_scalar("validation loss",self.all_val_losses[-1],global_step=self.epoch)
+                    for i,e in enumerate(l): 
+                        all_val_losses[i].append(e)
+                self.all_val_losses.append(np.mean(all_val_losses[0]))
+                self.log_recent_losses(all_val_losses,phase='val')
 
                 if self.also_val_in_tr_mode:
                     self.network.train()
                     # validation with train=True
                     val_losses = []
+                    all_train_val_losses = list(([],[],[],[],[]))
                     for b in range(self.num_val_batches_per_epoch):
                         l = self.run_iteration(self.val_gen, False)
-                        val_losses.append(l)
-                    self.all_val_losses_tr_mode.append(np.mean(val_losses))
-                    self.writer.add_scalar("train val loss",self.all_val_losses_tr_mode[-1],global_step=self.epoch)
+                        for i,e in enumerate(l): 
+                            all_train_val_losses[i].append(e)
+                    self.all_val_losses_tr_mode.append(np.mean(all_train_val_losses[0]))
+                    self.log_recent_losses(all_train_val_losses,phase='train val')
 
             self.update_train_loss_MA()  # needed for lr scheduler and stopping of training
 

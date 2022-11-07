@@ -22,7 +22,7 @@ from nnunet.configuration import default_num_threads
 from nnunet.paths import preprocessing_output_dir
 from batchgenerators.utilities.file_and_folder_operations import *
 
-
+import pdb 
 def get_case_identifiers(folder):
     case_identifiers = [i[:-4] for i in os.listdir(folder) if i.endswith("npz") and (i.find("segFromPrevStage") == -1)]
     return case_identifiers
@@ -87,6 +87,7 @@ def delete_npy(folder):
 
 
 def load_dataset(folder, num_cases_properties_loading_threshold=1000):
+    import pdb 
     # we don't load the actual data but instead return the filename to the np file.
     print('loading dataset')
     case_identifiers = get_case_identifiers(folder)
@@ -106,7 +107,6 @@ def load_dataset(folder, num_cases_properties_loading_threshold=1000):
         print('loading all case properties')
         for i in dataset.keys():
             dataset[i]['properties'] = load_pickle(dataset[i]['properties_file'])
-
     return dataset
 
 

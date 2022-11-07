@@ -21,7 +21,17 @@ import numpy as np
 from nnunet.network_architecture.initialization import InitWeights_He
 from nnunet.network_architecture.neural_network import SegmentationNetwork
 import torch.nn.functional
-from generic_UNet import * 
+from nnunet.network_architecture.generic_UNet import *
+import pdb  
+
+class linearModel(nn.Module):
+    def __init__(self,in_features=64) -> None:
+        super().__init__() 
+        self.model = nn.Linear(in_features,2)
+
+    def forward(self,x):
+        x = x.view(x.size(0),-1) 
+        return  self.model(x)
 
 class Generic_UNetDA(Generic_UNet):
     DEFAULT_BATCH_SIZE_3D = 2
@@ -60,6 +70,8 @@ class Generic_UNetDA(Generic_UNet):
         Questions? -> f.isensee@dkfz.de
         """
         super(Generic_UNet, self).__init__()
+        import pdb 
+        pdb.set_trace()
         self.convolutional_upsampling = convolutional_upsampling
         self.convolutional_pooling = convolutional_pooling
         self.upscale_logits = upscale_logits
@@ -180,8 +192,6 @@ class Generic_UNetDA(Generic_UNet):
         if not dropout_in_localization:
             old_dropout_p = self.dropout_op_kwargs['p']
             self.dropout_op_kwargs['p'] = 0.0
-        self.embed_discriminator = nn.Sequential( [ nn.Conv3d(final_num_features,64,4,2),nn.LeakyReLU(0.2),nn.Conv3d(final_num_features,128,4,2),nn.LeakyReLU(0.2),nn.BatchNorm3d(128),nn.Conv3d(128,1,4,2),nn.LeakyReLU(0.2)] )
-        self.map_discriminator = nn.Sequential( [ nn.Conv3d(final_num_features,64,4,2),nn.LeakyReLU(0.2),nn.Conv3d(final_num_features,128,4,2),nn.LeakyReLU(0.2),nn.BatchNorm3d(128),nn.Conv3d(128,1,4,2),nn.LeakyReLU(0.2)] )
         # now lets build the localization pathway
         for u in range(num_pool):
             nfeatures_from_down = final_num_features
@@ -236,8 +246,6 @@ class Generic_UNetDA(Generic_UNet):
         self.td = nn.ModuleList(self.td)
         self.tu = nn.ModuleList(self.tu)
         self.seg_outputs = nn.ModuleList(self.seg_outputs)
-        self.map_discriminator = nn.ModuleList(self.map_discriminator)
-        self.embed_discriminator = nn.ModuleList(self.embed_discriminator)
         if self.upscale_logits:
             self.upscale_logits_ops = nn.ModuleList(
                 self.upscale_logits_ops)  # lambda x:x is not a Module so we need to distinguish here
@@ -245,6 +253,9 @@ class Generic_UNetDA(Generic_UNet):
         if self.weightInitializer is not None:
             self.apply(self.weightInitializer)
             # self.apply(print_module_training_status)
+        self.load_state_dict(torch.load('/home/ramon/Datacenter_storage/ramon_dataset_curations/kidney_segmentation/data/models/nnunet_models/nnUNet/3d_fullres/Task135_KiTS2021/nnUNetTrainerV2__nnUNetPlansv2.1/fold_0/model_final_checkpoint.model')['state_dict'])
+        self.embed_discriminator = nn.Sequential(  nn.Conv3d(320,128,2,2),nn.LeakyReLU(0.2),nn.Conv3d(128,64,2,2),nn.LeakyReLU(0.2),nn.BatchNorm3d(64),linearModel())
+        self.map_discriminator = nn.Sequential(  nn.Conv3d(4,64,7,3),nn.LeakyReLU(0.2),nn.Conv3d(64,16,4,2),nn.LeakyReLU(0.2),nn.BatchNorm3d(16),linearModel(in_features=109744 ))
 
     def forward(self, x):
         skips = []
@@ -265,7 +276,7 @@ class Generic_UNetDA(Generic_UNet):
         map_pred = self.map_discriminator(seg_outputs[-1])
         if self._deep_supervision and self.do_ds:
             return tuple([seg_outputs[-1]] + [i(j) for i, j in
-                                              zip(list(self.upscale_logits_ops)[::-1], seg_outputs[:-1][::-1])])
+                                              zip(list(self.upscale_logits_ops)[::-1], seg_outputs[:-1][::-1])]),d_pred,map_pred
         else:
             return seg_outputs[-1],d_pred,map_pred
 
