@@ -151,7 +151,7 @@ def main():
         task_id = int(task_name)
         task_name = convert_id_to_task_name(task_id)
 
-    assert model in ["2d", "3d_lowres", "3d_fullres", "3d_cascade_fullres"], "-m must be 2d, 3d_lowres, 3d_fullres or " \
+    assert model in ["2d", "3d_lowres", "3d_fullres", "3d_cascade_fullres","3d_fullresdeb"], "-m must be 2d, 3d_lowres, 3d_fullres or " \
                                                                              "3d_cascade_fullres"
 
     # if force_separate_z == "None":
@@ -208,7 +208,11 @@ def main():
     if model == "3d_cascade_fullres":
         trainer = cascade_trainer_class_name
     else:
-        trainer = trainer_class_name
+        if model.endswith('deb'):
+            trainer = 'nnUNetTrainerV3'
+        else: 
+            trainer = 'nnUNetTrainerV2'
+        model='3d_fullres'
 
     model_folder_name = join(network_training_output_dir, model, task_name, trainer + "__" +
                               args.plans_identifier)
