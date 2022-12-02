@@ -70,8 +70,6 @@ class Generic_UNetDA(Generic_UNet):
         Questions? -> f.isensee@dkfz.de
         """
         super(Generic_UNet, self).__init__()
-        import pdb 
-        pdb.set_trace()
         self.convolutional_upsampling = convolutional_upsampling
         self.convolutional_pooling = convolutional_pooling
         self.upscale_logits = upscale_logits
@@ -253,9 +251,9 @@ class Generic_UNetDA(Generic_UNet):
         if self.weightInitializer is not None:
             self.apply(self.weightInitializer)
             # self.apply(print_module_training_status)
-        self.load_state_dict(torch.load('/home/ramon/Datacenter_storage/ramon_dataset_curations/kidney_segmentation/data/models/nnunet_models/nnUNet/3d_fullres/Task135_KiTS2021/nnUNetTrainerV2__nnUNetPlansv2.1/fold_0/model_final_checkpoint.model')['state_dict'])
+
         self.embed_discriminator = nn.Sequential(  nn.Conv3d(320,128,2,2),nn.LeakyReLU(0.2),nn.Conv3d(128,64,2,2),nn.LeakyReLU(0.2),nn.BatchNorm3d(64),linearModel())
-        self.map_discriminator = nn.Sequential(  nn.Conv3d(4,64,7,3),nn.LeakyReLU(0.2),nn.Conv3d(64,16,4,2),nn.LeakyReLU(0.2),nn.BatchNorm3d(16),linearModel(in_features=109744 ))
+        self.map_discriminator = nn.Sequential(  nn.Conv3d(2,64,7,3),nn.LeakyReLU(0.2),nn.Conv3d(64,16,4,2),nn.LeakyReLU(0.2),nn.BatchNorm3d(16),linearModel(in_features=138720  ))
 
     def forward(self, x):
         skips = []
@@ -278,7 +276,10 @@ class Generic_UNetDA(Generic_UNet):
             return tuple([seg_outputs[-1]] + [i(j) for i, j in
                                               zip(list(self.upscale_logits_ops)[::-1], seg_outputs[:-1][::-1])]),d_pred,map_pred
         else:
-            return seg_outputs[-1],d_pred,map_pred
+            if self.training==False: 
+                return seg_outputs[-1] 
+            else: 
+                return seg_outputs[-1],d_pred,map_pred
 
     @staticmethod
     def compute_approx_vram_consumption(patch_size, num_pool_per_axis, base_num_features, max_num_features,
